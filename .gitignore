@@ -1,0 +1,48 @@
+# 资格审查项目 .gitignore（白名单模式）
+# 说明：先忽略全部文件，再只放行代码；新增的数据、材料、输出默认都不会被提交。
+# 注意：考生材料、填报表、脱敏映射表、OCR 结果均含个人信息，严禁放行。
+
+# ---------- 1. 默认忽略全部 ----------
+*
+
+# 允许 git 进入子目录查找白名单文件（目录本身不会被提交）
+!*/
+
+# ---------- 2. 代码白名单 ----------
+!/.gitignore
+
+# 根目录脚本
+!/desensitize.py
+
+# 资格审查程序
+!/qualification_review/*.py
+!/qualification_review/*.mjs
+!/qualification_review/*.cmd
+!/qualification_review/README.md
+!/qualification_review/config.json
+!/qualification_review/tests/*.py
+
+# OCR 识别程序
+!/rapidocr_test/*.py
+!/rapidocr_test/*.cmd
+!/rapidocr_test/README.md
+!/rapidocr_test/requirements.txt
+!/rapidocr_test/tests/*.py
+
+# ---------- 3. 兜底排除（放在最后，优先级最高）----------
+# Python / 测试缓存
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# 考生原始材料与脱敏数据
+/2026-10-21*/
+/脱敏数据/
+
+# 程序数据、字典、模型与运行输出
+/qualification_review/data/
+/qualification_review/outputs/
+/qualification_review/tests/*/
+/rapidocr_test/models/
+/rapidocr_test/outputs/
+/rapidocr_test/tests/*/

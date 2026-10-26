@@ -1,0 +1,14 @@
+{
+  "cutoff": "2026-10-31",
+  "cohort": 2027,
+  "graduation_start": "2025-01-01",
+  "graduation_end": "2027-07-31",
+  "snapshot_date": "2026-10-21",
+  "personnel_file": "2026-10-21-2026-10-21资格审查信息 （21日1006导出）\\2026-10-21-2026-10-21资格审查信息.xlsx",
+  "personnel_sheet": "考生资格审查信息",
+  "jobs_file": "3.天津市烟草专卖局（公司）招聘岗位计划表.xlsx",
+  "standard_sha256": {
+    "管理岗标准.xls": "9ddc2189480676889b83450efa196dd6debf0b839edfe2459093d9d336d1b511",
+    "业务岗标准.xls": "f094d2085f7653022fb77223663c5397d95c0f444d776f7767a4f885cc7a895b"
+  }
+}

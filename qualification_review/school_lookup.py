@@ -34,8 +34,9 @@ class SchoolDictionary:
         self.qs = json.loads((ROOT/'data/qs_2027_bilingual.json').read_text(encoding='utf-8'))
         self.foreign = {}
         for r in self.qs:
-            for name in [r['english'], r['chinese']]:
-                self.foreign.setdefault(normalize(name), []).append(r)
+            names={normalize(name) for name in [r['english'],r['chinese']]+r.get('aliases',[])}
+            for name in names:
+                self.foreign.setdefault(name, []).append(r)
 
     def lookup(self, name, overseas=False):
         if overseas:

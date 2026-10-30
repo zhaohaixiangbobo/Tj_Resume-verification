@@ -20,6 +20,8 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 from school_lookup import ROOT, SchoolDictionary, normalize, qs_band
 from major_matching import compare_major, parse_allowed, explain, RULE_VERSION
+from graduation_rules import graduation_points
+from undergraduate_school import undergraduate_score
 
 PASS, FAIL, WAIT, NA = '符合', '不符合', '待复核', '不适用'
 SCORE_NAMES = ['应聘院校','学历层次','学习形式','政治面貌','毕业年限','在校成绩',
@@ -215,10 +217,10 @@ def export_dictionary(schools,out):
       ['科研院所及党校','本字典为高校名单，未穷举科研院所和党校。标准中对应按211/普通公办赋分的机构需补充官方身份依据后录入复核表。'],
       ['QS名称','英文名称和排名来自QS官网。中文为整理译名，非QS官方中文版；同名学校结合国家地区及英文名核对。'],
       ['QS范围','仅前200名公开页面的200条记录。未查到学校时待核验，不能由缺席本表推定具体排名。'],
-      ['QS源页面检查','源页面第97–100名附近并列编号、115之后跳至118存在序号衔接异常。本表忠实保留原始名次；这些异常均在同一赋分档内，仍建议业务复核。'],
+      ['QS源页面检查','按用户提供的2026-10-30核对说明修订：并列名次造成名次号空缺属于正常编号机制，保留原始名次及并列标记。'],
       ['QS发布来源','https://www.qs.com/insights/qs-world-university-rankings-2027-results-table-excel'],
-      ['地矿油两地办学依据','https://www.moe.gov.cn/moe_879/moe_1252/s8447/201412/t20141204_180158.html'],
-      ['上海体育大学更名依据','https://fzgh.sus.edu.cn/info/1065/1021.htm'],
+      ['地矿油两地办学依据','http://www.moe.gov.cn/srcsite/A22/s7065/202202/W020220214318455516037.pdf'],
+      ['上海体育大学更名依据','https://www.moe.gov.cn/srcsite/A03/s181/202306/t20230616_1064609.html'],
       ['军医大学更名依据','https://www.mod.gov.cn/gfbw/gfjy_index/4806474.html'],
       ['国防科技大学更名依据','https://www.nudt.edu.cn/xxgk/kdjj/index.htm'],
       ['学校匹配','采用完整校名精确匹配和四条已核实更名映射。独立学院、分校不按母校名称包含关系赋分。']]
@@ -244,14 +246,17 @@ def load_reviews(path):
         result[key]=r
     return result
 
-def run(config_path,person_path=None,review_path=None,out_arg=None):
+def run(config_path,person_path=None,review_path=None,out_arg=None, *, selected_ids=None, data_only=False, qualification_overrides=None):
     cfg=json.loads(config_path.read_text(encoding='utf-8')); base=config_path.parent.parent
     cutoff=date.fromisoformat(cfg['cutoff']); cohort=cfg['cohort']
     start=date.fromisoformat(cfg['graduation_start']);end=date.fromisoformat(cfg['graduation_end'])
     ppath=person_path or base/cfg['personnel_file'];jpath=base/cfg['jobs_file']
-    out=out_arg or ROOT/'outputs'/datetime.now().strftime('%Y%m%d_%H%M%S_%f');out.mkdir(parents=True,exist_ok=False)
+    out=out_arg or ROOT/'outputs'/datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    if not data_only:out.mkdir(parents=True,exist_ok=False)
     print('[1/4] 读取输入与院校字典',flush=True)
     schools=SchoolDictionary();psheet,persons,pcols=load_table(ppath,cfg['personnel_sheet'])
+    if selected_ids is not None:
+        persons=[(r,p) for r,p in persons if text(p.get('身份证号码')).upper() in selected_ids]
     jsheet,jobs,_=load_table(jpath)
     required=['姓名','身份证号码','岗位编码','出生日期','考生类别','政治面貌','最高学历','最高学位','最高学历毕业院校','最高学历毕业时间','最高学历所学专业','最高学历学习形式','学习经历','奖学金','表彰奖励','英语等级','计算机等级']
     for h in required:
@@ -262,21 +267,21 @@ def run(config_path,person_path=None,review_path=None,out_arg=None):
         if not key or key in jobmap:raise ValueError('岗位编码空白或重复：'+key)
         jobmap[key]=(i,j)
     reviews=load_reviews(review_path);used=set();details=[];summaries=[];forms=[];major_details=[]
-    ids=Counter(text(p['身份证号码']) for _,p in persons)
+    ids=Counter(text(p['身份证号码']).upper() for _,p in persons)
     std=[]
     for file in ['管理岗标准.xls','业务岗标准.xls']:
         path=base/file;digest=hashlib.sha256(path.read_bytes()).hexdigest()
         if digest!=cfg['standard_sha256'][file]:raise ValueError(file+'已变化，请先审核新标准并更新程序规则及配置中的哈希')
         sh=xlrd.open_workbook(path).sheet_by_index(0)
         for i in range(sh.nrows):std.append([file,sh.name,i+1,*[text(v) for v in sh.row_values(i)],'',''])
-    manifest={'config':cfg,'major_rule_version':RULE_VERSION,
+    manifest={'config':cfg,'major_rule_version':RULE_VERSION,'grade_rule_version':'self_report_yes_zero_v1','qualification_version':'proof_required_v2',
               'major_engine_sha256':hashlib.sha256((ROOT/'major_matching.py').read_bytes()).hexdigest(),
               'personnel_sha256':hashlib.sha256(ppath.read_bytes()).hexdigest(),
               'jobs_sha256':hashlib.sha256(jpath.read_bytes()).hexdigest(),
               'domestic_sha256':hashlib.sha256((ROOT/'data/domestic_schools.csv').read_bytes()).hexdigest(),
               'qs_sha256':hashlib.sha256((ROOT/'data/qs_2027_bilingual.json').read_bytes()).hexdigest()}
     for n,(r,p) in enumerate(persons,1):
-        name=text(p['姓名']); jobid=text(p['岗位编码']); ident=text(p['身份证号码'])
+        name=text(p['姓名']); jobid=text(p['岗位编码']); ident=text(p['身份证号码']).upper()
         pid=hashlib.sha256(ident.encode()).hexdigest()[:16] if ident else f'无证件号-源行{r}'
         fingerprint=hashlib.sha256(json.dumps([p,jobmap.get(jobid),manifest],ensure_ascii=False,default=str,sort_keys=True).encode()).hexdigest()
         rows=[]
@@ -284,9 +289,14 @@ def run(config_path,person_path=None,review_path=None,out_arg=None):
             raw='\n'.join(f'{c}：{text(p.get(c))}' for c in columns)
             loc='；'.join(f'{ppath.name}/{psheet}!{pcols[c]}{r}' for c in columns if c in pcols)
             key=(pid,jobid,code)
+            override=(qualification_overrides or {}).get(key)
+            if code.startswith('Q') and override:
+                status=override['conclusion'];reason+='\n人工建议：'+override['reason']+'；审核人：'+override['reviewer']
             if key in reviews:
                 a=reviews[key]
                 if text(a['输入指纹'])!=fingerprint:raise ValueError(f'{name}/{code}复核对应的输入已变化，请重新复核')
+                if (code in {'Q11','Q12'} and a.get('复核结论')==PASS) or (code in {'S04','S11'} and isinstance(a.get('复核得分'),(int,float)) and a['复核得分']>0):
+                    raise ValueError('党员或法律/其他证书正向结论需照片证明，请使用桌面版的材料复核入口')
                 if code.startswith('Q'):
                     if a['复核结论'] not in {PASS,FAIL,WAIT,NA}:raise ValueError('复核结论只允许符合、不符合、待复核、不适用')
                     status=a['复核结论']
@@ -309,8 +319,9 @@ def run(config_path,person_path=None,review_path=None,out_arg=None):
         master=jdegree=='硕士' if jdegree else d=='硕士';limits=MAX_MASTER if master else MAX_BACHELOR
         add('Q00','记录和岗位关联',PASS if js and ident and ids[ident]==1 else WAIT,None,None,
             '按岗位编码关联；重复报名、无证件号或岗位未命中需复核', ['岗位编码','姓名'])
-        cat=text(p['考生类别']);overseas='境外' in cat or '国外' in cat or '留学' in cat
-        domestic='国内' in cat
+        from candidate_rules import candidate_category
+        category=candidate_category(p['考生类别'])
+        cat=category['name'];overseas=category['overseas'];domestic=category['domestic']
         add('Q01','考生类别',PASS if domestic or overseas else WAIT,None,None,'按考生类别分流，国家及学校名称仅辅助核验',['考生类别'])
         grad=interval(p['最高学历毕业时间'])
         add('Q02','毕业日期范围',within(p['最高学历毕业时间'],start,end),None,None,
@@ -321,7 +332,7 @@ def run(config_path,person_path=None,review_path=None,out_arg=None):
         pair={'本科':'学士','硕士':'硕士','博士':'博士'}
         add('Q05','学历学位组合',PASS if d and text(p['最高学位'])==pair[d] else WAIT,None,None,'核对最高学历对应的学位名称',['最高学历','最高学位'])
         add('Q06','学历学位取得及认证',WAIT,None,None,
-            '补充学位取得日期、教育部门认证完成情况和日期' if overseas else '补充国家承认、已取得或预计在毕业期限内取得学历及学位的声明',['最高学历','最高学位','最高学历毕业时间'])
+            f'境外毕业取得学位须在{start}至{end}；学历认证最迟{cfg.get("overseas_certification_deadline","2027-07-31")}完成。{category["evidence"]}' if overseas else category['evidence'],['最高学历','最高学位','最高学历毕业时间','考生类别'])
         birth=interval(p['出生日期']);age18=date(cutoff.year-18,cutoff.month,cutoff.day)
         age_status=within(p['出生日期'],date(1900,1,1),age18)
         iddate=None
@@ -343,12 +354,12 @@ def run(config_path,person_path=None,review_path=None,out_arg=None):
         major_details.append([pid,name,jobid,text(p['最高学历所学专业']),match.actual,
                               '、'.join(match.allowed),'、'.join(match.matched),match.kind,match.status,rows[-1][5],match.reason,jobloc])
         other=text(j.get('其他资格条件要求'))
-        add('Q11','岗位党员条件',(PASS if party(p['政治面貌']) else FAIL if text(p['政治面貌']) else WAIT) if '中共党员' in other else NA,None,None,
-            '接受中共党员及预备党员；岗位其他条件：'+other,['政治面貌','岗位编码'])
-        axkey=next((h for h in p if h.startswith('法律职业资格证书')),None);ax=text(p.get(axkey))
+        add('Q11','岗位党员条件',(WAIT if party(p['政治面貌']) else FAIL if text(p['政治面貌']) else WAIT) if '中共党员' in other else NA,None,None,
+            '接受中共党员及预备党员；必须核对党员证明原件照片或扫描材料，填报不能代替证明；岗位其他条件：'+other,['政治面貌','岗位编码'])
+        axkey=next((h for h in p if h.startswith(('法律职业资格证书','其他职业资格证书'))),None);ax=text(p.get(axkey))
         legal=bool(re.search(r'(?:具有|持有|取得|获得|已获).{0,8}法律职业资格(?:证书|证)|法律职业资格(?:证书|证)[（(]A证|法律职业资格A证',ax)) and not bool(re.search(r'未(?:取得|获得)|尚未|拟申请|待领取',ax))
-        add('Q12','岗位法律资格证',(PASS if legal else WAIT) if '法律职业资格' in other else NA,None,None,
-            '按明确持证自述预审，考试通过不能独立替代取得证书；岗位其他条件：'+other,[axkey] if axkey else [])
+        add('Q12','岗位法律资格证',WAIT if '法律职业资格' in other else NA,None,None,
+            '必须核对法律职业资格证书照片或扫描材料；持证自述和考试合格不能替代证书材料；岗位其他条件：'+other,[axkey] if axkey else [])
         periods=education(p['学习经历']);high=[e for e in periods if e['degree']==d]
         cross=PASS if len(high)==1 else WAIT
         discrepancies=[]
@@ -370,15 +381,17 @@ def run(config_path,person_path=None,review_path=None,out_arg=None):
         ss,snote=schools.lookup(p['最高学历毕业院校'],overseas)
         standard='管理岗标准.xls' if master else '业务岗标准.xls';scorecol='E' if master else 'D'
         def score(i,value,reason,columns,pending=False):
+            if any(a[3].startswith('Q') and a[5]==FAIL for a in rows):
+                return
             add(f'S{i:02}',SCORE_NAMES[i-1],WAIT if pending or value is None else '按填报试算',value,limits[i-1],
                 reason+f'\n标准：{standard}/天津市局!{scorecol}{STANDARD_ROWS[i-1]}，完整条款见核验规则工作簿。',columns)
         score(1,ss,snote,['最高学历毕业院校','考生类别'])
         score(2,10 if d in {'本科','硕士'} and d==jdegree else None,'按最高学历与岗位对应标准计分',['最高学历','岗位编码'])
         score(3,10 if p['最高学历学习形式']=='全日制' else 0 if p['最高学历学习形式']=='非全日制' else None,'全日制10分',['最高学历学习形式'])
-        score(4,5 if party(p['政治面貌']) else 0 if text(p['政治面貌']) else None,'党员含预备党员5分',['政治面貌'])
-        score(5,10 if grad and grad[0].year==cohort else 5 if grad and start.year<=grad[0].year<cohort else None,f'招聘届别固定为{cohort}；当年10分，往年5分，身份另核验',['最高学历毕业时间'])
+        score(4,5 if party(p['政治面貌']) else 0 if text(p['政治面貌']) else None,'党员含预备党员5分，申请该分必须提供相关证明，填报分仅作试算',['政治面貌'],pending=party(p['政治面貌']))
+        score(5,graduation_points(grad[0].year,grad[0].month,grad[0].day if grad[0]==grad[1] else None,cohort,start.year) if grad else None,f'报名填报毕业时间：{text(p["最高学历毕业时间"]) or "未填写"}；待核查',['最高学历毕业时间'])
         gradecol=next(h for h in p if h.startswith('在读期间有无'))
-        score(6,2 if p[gradecol]=='否' else None,'无补考重修不合格记录2分；有记录者核对学校正式审批例外',[gradecol])
+        score(6,2 if p[gradecol]=='否' else 0 if p[gradecol]=='是' else None,'填是按本次确认口径0分并跳过成绩凭证；填否仅按填报试算2分，凭证核验需完整成绩材料；空白待复核',[gradecol])
         for i,kind,field,flag in [(7,'scholarship','奖学金','高等教育期间是否取得奖学金'),(8,'honor','表彰奖励','高等教育期间是否获得表彰奖励')]:
             value,pend,why=awards(p[field],kind,high,ss,master,cutoff,overseas)
             if not text(p[field]) and text(p.get(flag))!='否':pend=True;why+='；明细为空，需核对'
@@ -393,11 +406,13 @@ def run(config_path,person_path=None,review_path=None,out_arg=None):
         score(10,es,'六级425、专四/专八60、雅思6.5、托福90任一达标。未明确达标的补充核验',['英语等级']+([axkey] if axkey else []))
         cpa=bool(re.search(r'(?:取得|获得|持有).{0,8}注册会计师全科合格证',ax)) and not bool(re.search(r'未取得|未获得|尚未|拟申请',ax))
         score(11,1 if legal or cpa else None,'取得法职资格证或CPA全科合格证1分；未明确填报证书情况待复核',[axkey] if axkey else [])
-        under=[e for e in periods if e['degree']=='本科'];us=None;unote='本科经历未能唯一解析'
-        if len(under)==1:
-            raw,unote=schools.lookup(under[0]['school']);us=(raw-20)/5 if raw is not None else None
-        score(12,us if master else 0,unote if master else '业务岗无本科学校附加分',['学习经历'])
-        score(13,None,'按标准由业务部门综合评定并填写依据；管理岗0或3分，业务岗0或5分',[axkey] if axkey else [])
+        us,unote,upending=undergraduate_score(periods,schools)
+        score(12,us if master else 0,unote if master else '业务岗无本科学校附加分',['学习经历'],pending=upending if master else False)
+        # 人岗匹配度按参考赋分表（通过资格审查人员赋分表.xls）实际口径：本人填报性别为男计岗位满分，女计0分，空白或其他取值待人工确认。
+        sex=text(p.get('性别'))
+        score(13,limits[12] if sex=='男' else 0 if sex=='女' else None,
+              f'按本人填报性别直接定分：男计{limits[12]}分（{"管理岗" if master else "业务岗"}本项满分），女计0分；'
+              '性别空白或非男女取值待业务部门人工确认',['性别'])
         st,sp,sr=student_score(periods,master,cutoff)
         # AX可能记载比AG更高职务，保留复核，不能因AG未提及便漏计。
         if st<limits[13] and re.search(r'班长|团支|学生会|研究生会|党支部|副部长|学生工作',ax):sp=True;sr+='\nAX可能另含学生工作，需核对在读阶段及职务。'
@@ -412,13 +427,16 @@ def run(config_path,person_path=None,review_path=None,out_arg=None):
         conclusion=FAIL if any(a[5]==FAIL for a in q) else WAIT if any(a[5]==WAIT for a in q) else PASS
         subtotal=sum(a[6] or 0 for a in scores);pending=sum(a[5]==WAIT for a in scores)
         assert 0<=subtotal<=100
-        summaries.append([pid,name,jobid,text(p.get('岗位名称')),conclusion,'管理岗' if master else '业务岗',subtotal,
-                          pending,subtotal if pending==0 else None,'全部项目已试算' if pending==0 else '部分项目待复核，小计不作最终排名',r,
+        summaries.append([pid,name,jobid,text(p.get('岗位名称')),conclusion,'管理岗' if master else '业务岗',subtotal if conclusion!=FAIL else None,
+                          pending,subtotal if pending==0 and conclusion!=FAIL else None,'资格明确不符合，不赋分' if conclusion==FAIL else '全部项目已试算' if pending==0 else '部分项目待复核，小计不作最终排名',r,
                           '\n'.join(a[4]+':'+a[5] for a in q if a[5] in {FAIL,WAIT})])
         details.extend(rows)
         print(f'  [{n}/{len(persons)}] {n/len(persons):.0%} 已完成逐项核验',flush=True)
     unused=set(reviews)-used
     if unused:raise ValueError(f'{len(unused)}条复核未对应本次人员或规则，已停止输出')
+    if data_only:
+        return {'config':cfg,'manifest':manifest,'persons':persons,'columns':pcols,'sheet':psheet,
+                'details':details,'summaries':summaries,'forms':forms,'jobs':jobmap}
     print('[3/4] 导出结果、规则、院校字典',flush=True)
     b=openpyxl.Workbook();b.remove(b.active)
     add_sheet(b,'人员汇总',['人员编号','姓名','岗位编码','岗位名称','资格预审','采用标准','已识别试算小计','待复核赋分项数','完整试算分','分数状态','人员源行','资格问题'],summaries,{10:44,12:75})
@@ -428,11 +446,11 @@ def run(config_path,person_path=None,review_path=None,out_arg=None):
     dv=DataValidation(type='list',formula1='"符合,不符合,待复核,不适用"');fs.add_data_validation(dv);dv.add(f'I2:I{fs.max_row}')
     add_sheet(b,'运行说明',['事项','说明'],[
         ['截止日',str(cutoff)],['输入快照日期',cfg['snapshot_date']],['试算依据','按自述填报信息，材料真实性未核验。奖项逐条核对日期及学历阶段。'],
-        ['分数解释','已识别小计包含已识别证据；待复核项目可能已有部分得分。完整试算分仅在各评分项均明确时显示。资格不符合人员仍列出诊断性试算，不列入合格排名。'],
+        ['分数解释','已识别小计为填报试算；待复核项目可能已有部分得分。资格不符合人员不赋分，只在汇总表列原因；待复核人员继续试算。'],
         ['复核操作','在复核录入表填写I/J/K/L列，另存工作簿后用 --review 指定。资格填结论；赋分填允许档位分数；每项必须有依据和复核人。输入变化须重做复核。'],
         ['复核时间要求','对证书、职务、奖项和实习，复核依据写明取得/发生日期、所处学历阶段及适用条款。'],
         ['重复报名','同证件号记录进入待复核；请先处理重复报名，复核表键为人员编号+岗位编码+规则编号。'],
-        ['人工判断','人岗匹配和复杂科研/实习需业务部门判断；政治面貌仅使用本人填报，性别民族身高体重不参与赋分。']],{2:110})
+        ['人工判断','复杂科研/实习需业务部门判断；党员和法律资格正向结论须走桌面材料复核。人岗匹配度按本人填报性别直接定分（管理岗男3女0、业务岗男5女0），民族身高体重不参与赋分。']],{2:110})
     b.save(out/'资格审查与赋分试算.xlsx')
     export_rules(cfg,base,out)
     export_dictionary(schools,out)
@@ -451,13 +469,13 @@ def export_rules(cfg,base,out):
         ['Q03','培养身份','AE学习形式、Y学校','补充声明','国内普通高校，非委培、非定向，缺声明待复核'],
         ['Q04','就业状态','U、补充声明','未落实工作单位','实习和档案信息不推断就业状态'],
         ['Q05','学历学位','W学历、X学位','本科/学士；硕士/硕士','核对组合'],
-        ['Q06','取得与认证','W/X/Z、补充声明','毕业期限内取得学历学位；境外完成教育部门认证','补充日期和声明，缺失待复核'],
+        ['Q06','取得与认证','W/X/Z、补充声明','2025-01-01至2027-07-31取得境外学位，最迟2027-07-31完成认证','四类身份分别核对学籍/毕业学位/留服认证材料，缺失待复核'],
         ['Q07','18周岁','L出生日期、K身份证交叉核对',cfg['cutoff'],'截至本日满18周岁'],
         ['Q08','出生下限','L、W','本科2002-01-01；硕士1999-01-01','含边界；博士按Q09排除'],
         ['Q09','学历对应','W/X、岗位表F','本科报本科，硕士报硕士','博士不接受；硕士不能报本科岗'],
         ['Q10','主专业','AA、AG；岗位表G/H','精确命中/疑似待复核/不匹配','本科用G，硕士用H；修饰词、包含或共同前缀待复核；保留法律限定；中英文译名不自动等同，详见专业匹配规则'],
-        ['Q11','党员要求','S；岗位表I','含预备党员','按本人明确填报'],
-        ['Q12','法律资格','AX；岗位表I','明确取得法律职业资格证','考试通过与持证区分'],
+        ['Q11','党员要求','S；岗位表I；证明材料','含预备党员','正向结论必须关联本人相关证明并确认原图'],
+        ['Q12','法律资格','AX；岗位表I；证书照片','明确取得法律职业资格证','必须有证书照片/扫描件并人工核对；考试通过与持证区分'],
         ['Q13','经历一致性','AG与W/Y/Z/AA','学校、主专业、毕业年月一致','识别失败或差异待复核'],
         ['Q14','其他附加条件','岗位表I','党员和法律资格以外要求','新出现的要求保留人工复核'],
     ]
@@ -487,18 +505,18 @@ def export_rules(cfg,base,out):
         '完整校名查教育部字典；境外查QS2027前200；未知待复核',
         '学历与岗位精确对应，符合本标准学历10分', '全日制10分', '中共党员含预备5分',
         '2027年毕业10分，2025/2026年5分，身份单独核验',
-        'AF否=2分；AF是先核对学校正式审批例外',
+        'AF是=0分并跳过成绩凭证；AF否仅按填报试算2分，凭证核验须检查完整成绩材料；空白待复核',
         'AJ逐条日期对最高学历在读期及截止日；最高一次；励志仅业务4分；院系级和颁发机关歧义复核',
         'AM仅最高学历期间列举荣誉，最高一次；竞赛不计本荣誉项；优秀研究生等同关系复核',
         'AO全国计算机三级以上1.5、二级0.5；其他补充',
         'AN及AX任一英语阈值达标0.5；未明确部分需人工复核',
         'AX明确持证法律或CPA全科1分；未明确补充',
         '管理岗AG本科院校4/3/2/1/0；业务岗不加此项',
-        '业务人工评价，管理0/3，业务0/5；必须写依据',
+        '按本人填报性别定分，管理岗男3女0，业务岗男5女0；性别空白待人工确认',
         'AG和AX；管理本科及硕士阶段0/1/2，业务本科阶段0/1/3；未列职务等同关系复核',
         '管理：仅硕士科研0/1，核对作者位次和公开发表/授权等；业务：仅本科实习实践0/2；人工记录依据',
     ]
-    mapping=['Y/U/AG','W/X/F','AE/AG','S','Z/U','AF','AH/AI/AJ/AG/Y','AK/AL/AM/AG','AO/AX','AN/AX','AX','AG','AX及人工','AG/AX','AX/AG/AM']
+    mapping=['Y/U/AG','W/X/F','AE/AG','S','Z/U','AF','AH/AI/AJ/AG/Y','AK/AL/AM/AG','AO/AX','AN/AX','AX','AG','J','AG/AX','AX/AG/AM']
     add_sheet(b,'赋分处理规则',['编号','项目','人员列','管理上限','业务上限','程序处理','业务审核意见','审核人'],
               [[f'S{i+1:02}',SCORE_NAMES[i],mapping[i],MAX_MASTER[i],MAX_BACHELOR[i],processing[i],'',''] for i in range(15)],{6:100,7:50})
     for fn in ['管理岗标准.xls','业务岗标准.xls']:
@@ -515,7 +533,8 @@ def export_rules(cfg,base,out):
         ['管理励志奖学金','管理标准对应行是/，保留待复核；业务标准明确为4分','',''],
         ['业务标准已更换','采用当前新版，实习2分、学生工作3分、人岗匹配5分','',''],
         ['院校特殊情况','合作办学、科研院所、党校和未知/旧校名先核对；未找到不直接按最低档','',''],
-        ['人工评分','人岗匹配、复杂科研/实习及未能可靠解析的证据人工判定；每项需依据及复核人','',''],
+        ['人岗匹配度口径','按参考赋分表实际填法，以本人填报性别直接定分：男计本项满分（管理岗3、业务岗5），女计0分；标准原文的“综合研判”不再要求逐人人工录入','',''],
+        ['人工评分','复杂科研/实习及未能可靠解析的证据人工判定；每项需依据及复核人','',''],
         ['排名','本版输出试算分及待复核项，不生成录取名单或缺项情况下的排名','',''],
         ['格式核对','按用户要求未进行视觉版式核对，仅执行结构、内容及核心逻辑测试','','']],{2:110,3:50})
     b.save(out/'核验规则_业务审核.xlsx')
